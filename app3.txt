@@ -1,0 +1,152 @@
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from dash import Dash, html, dcc, Input, Output
+
+# Caminho do seu arquivo
+PATH_ARQUIVO = r"P:\PUBLICO\Contenção\Quarentena Controle\2026\controle_lancamento_seguro\REGISTROS_E_ CADASTROS DE PRODUTOS_LANÇAMENTO_SEGURO_CONTENÇÃO 13_02_26.xlsx"
+
+def carregar_dados_reais():
+    try:
+        df_raw = pd.read_excel(PATH_ARQUIVO)
+        header_row = 0
+        for i, row in df_raw.iterrows():
+            if "Produto" in [str(v).strip() for v in row.values]:
+                header_row = i + 1
+                break
+        
+        df = pd.read_excel(PATH_ARQUIVO, skiprows=header_row)
+        df.columns = [str(c).replace('\n', ' ').strip() for c in df.columns]
+        
+        c_prod, c_insp, c_ruim_total, c_data = 'Produto', 'Qtd Inspecionada', 'Qtd Ruim', 'Data'
+        
+        df = df.dropna(subset=[c_prod])
+        df[c_prod] = df[c_prod].astype(str).str.strip()
+        df[c_data] = pd.to_datetime(df[c_data], errors='coerce')
+        
+        for c in [c_insp, c_ruim_total]:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+
+        lista_defeitos = []
+        for i in range(1, 5):
+            col_n, col_q = f'Defeito {i}', f'Qtd Defeito {i}'
+            if col_n in df.columns and col_q in df.columns:
+                df[col_q] = pd.to_numeric(df[col_q], errors='coerce').fillna(0)
+                for _, linha in df.iterrows():
+                    nome_v, qtd_v = str(linha[col_n]).strip(), linha[col_q]
+                    if nome_v.lower() != 'nan' and nome_v != '' and qtd_v > 0:
+                        if nome_v.endswith('.0'): nome_v = nome_v[:-2]
+                        lista_defeitos.append({'Produto': linha[c_prod], 'Descricao': nome_v, 'Quantidade': qtd_v})
+        
+        return df, pd.DataFrame(lista_defeitos)
+    except Exception as e:
+        print(f"Erro na leitura: {e}")
+        return None, None
+
+app = Dash(__name__)
+
+app.layout = html.Div(style={'fontFamily': 'Arial', 'padding': '20px'}, children=[
+    dcc.Interval(id='intervalo', interval=300000, n_intervals=0),
+    html.H1("PRO-METAL - Safety Launch", style={'textAlign': 'center', 'color': '#003366'}),
+    html.Div(id='txt-update', style={'textAlign': 'right', 'color': 'gray', 'fontSize': '12px'}),
+    
+    # KPIs e Status de Contenção
+    html.Div(id='kpis-content'),
+    
+    # Detalhe por produto
+    html.Div(style={'backgroundColor': '#f8f9fa', 'padding': '20px', 'borderRadius': '10px', 'border': '1px solid #ddd'}, children=[
+        html.H3("Análise de Defeitos por Produto"),
+        dcc.Dropdown(id='dropdown-prod', clearable=False, style={'width': '50%'}),
+        dcc.Graph(id='grafico-detalhe')
+    ]),
+    
+    # Gráfico Geral
+    html.H3("Visão Geral de Inspeção vs Refugo (Escalas Independentes)", style={'marginTop': '40px'}),
+    dcc.Graph(id='grafico-geral')
+])
+
+@app.callback(
+    [Output('kpis-content', 'children'), Output('dropdown-prod', 'options'),
+     Output('dropdown-prod', 'value'), Output('grafico-geral', 'figure'),
+     Output('txt-update', 'children')],
+    [Input('intervalo', 'n_intervals')], [Input('dropdown-prod', 'value')]
+)
+def atualizar_pagina(n, prod_sel):
+    df, df_def = carregar_dados_reais()
+    if df is None: return html.Div("Erro"), [], None, go.Figure(), "Erro"
+    
+    prods = sorted(df['Produto'].unique())
+    opcoes = [{'label': p, 'value': p} for p in prods]
+    val = prod_sel if prod_sel in prods else (prods[0] if prods else None)
+
+    # Lógica 90 dias
+    hoje = pd.Timestamp.now().normalize()
+    df_p = df[df['Produto'] == val].sort_values('Data', ascending=False)
+    falhas = df_p[df_p['Qtd Ruim'] > 0]
+    ultima_f = falhas['Data'].max() if not falhas.empty else df_p['Data'].min()
+    dias = (hoje - ultima_f).days if pd.notnull(ultima_f) else 0
+    cor = "#28a745" if dias >= 90 else "#ff8c00"
+    txt_status = f"LIBERADO ({dias} Dias OK)" if dias >= 90 else f"EM CONTENÇÃO ({dias}/90 Dias)"
+
+    kpis = html.Div(style={'display': 'flex', 'justifyContent': 'space-around', 'marginBottom': '20px'}, children=[
+        html.Div([html.B("INSPECIONADO TOTAL"), html.H2(f"{df['Qtd Inspecionada'].sum():,.0f}")], style={'textAlign': 'center'}),
+        html.Div([html.B(f"STATUS: {val}"), html.H2(txt_status, style={'color': cor, 'fontSize': '24px'})], 
+                 style={'textAlign': 'center', 'border': f'2px solid {cor}', 'padding': '10px', 'borderRadius': '10px'}),
+        html.Div([html.B("REFUGO TOTAL"), html.H2(f"{df['Qtd Ruim'].sum():,.0f}", style={'color': 'red'})], style={'textAlign': 'center'}),
+    ])
+    
+    # --- CORREÇÃO DO GRÁFICO GERAL (INVERSÃO DE BARRAS) ---
+    df_g = df.groupby('Produto')[['Qtd Inspecionada', 'Qtd Ruim']].sum().reset_index()
+    fig_g = make_subplots(specs=[[{"secondary_y": True}]])
+    
+    # Barra Inspeção (Eixo Esquerdo)
+    fig_g.add_trace(go.Bar(
+        x=df_g['Produto'], y=df_g['Qtd Inspecionada'], name="Inspecionado",
+        marker_color='#0055aa', text=df_g['Qtd Inspecionada'], textposition='auto',
+        offsetgroup=1
+    ), secondary_y=False)
+
+    # Barra Refugo (Eixo Direito)
+    fig_g.add_trace(go.Bar(
+        x=df_g['Produto'], y=df_g['Qtd Ruim'], name="Refugo",
+        marker_color='#cc0000', text=df_g['Qtd Ruim'], textposition='outside',
+        offsetgroup=2
+    ), secondary_y=True)
+    
+    fig_g.update_layout(
+        barmode='group',
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        xaxis={'title': 'Produtos'},
+        yaxis={'title': 'Qtd Inspecionada', 'rangemode': 'tozero'},
+        yaxis2={'title': 'Qtd Ruim', 'rangemode': 'tozero', 'overlaying': 'y', 'side': 'right'}
+    )
+    
+    return kpis, opcoes, val, fig_g, f"Sincronizado: {pd.Timestamp.now().strftime('%H:%M:%S')}"
+
+@app.callback(
+    Output('grafico-detalhe', 'figure'),
+    [Input('dropdown-prod', 'value'), Input('intervalo', 'n_intervals')]
+)
+def atualizar_defeitos(prod, n):
+    df, df_def = carregar_dados_reais()
+    if df_def is None or df_def.empty or not prod: return px.bar()
+    
+    total_refugo = df[df['Produto'] == prod]['Qtd Ruim'].sum()
+    df_f = df_def[df_def['Produto'] == prod].groupby('Descricao', as_index=False)['Quantidade'].sum()
+    
+    df_plot = pd.concat([
+        pd.DataFrame([{'Descricao': 'TOTAL GERAL', 'Quantidade': total_refugo}]),
+        df_f.sort_values('Quantidade', ascending=True)
+    ], ignore_index=True)
+
+    fig = px.bar(df_plot, x='Quantidade', y='Descricao', orientation='h', text='Quantidade',
+                 color='Descricao', color_discrete_map={'TOTAL GERAL': '#333333'},
+                 color_discrete_sequence=['#cc0000'])
+    fig.update_layout(showlegend=False, yaxis={'type': 'category', 'autorange': 'reversed', 'title': ''})
+    fig.update_traces(textposition='outside')
+    return fig
+
+if __name__ == '__main__':
+    app.run(debug=False, host='0.0.0.0', port=5004)
