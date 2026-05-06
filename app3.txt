@@ -19,15 +19,32 @@ def carregar_dados_reais():
         df = pd.read_excel(PATH_ARQUIVO, skiprows=header_row)
         df.columns = [str(c).replace('\n', ' ').strip() for c in df.columns]
         
-        c_prod, c_insp, c_ruim_total, c_data = 'Produto', 'Qtd Inspecionada', 'Qtd Ruim', 'Data'
+        # Nomes padronizados para uso interno no código
+        c_prod, c_insp, c_ruim_total, c_data, c_horas = 'Produto', 'Qtd Inspecionada', 'Qtd Ruim', 'Data', 'Horas'
         
+        # Mapeamento robusto para garantir que as colunas sejam encontradas mesmo com variações
+        mapeamento = {
+            c_prod: ["produto"],
+            c_insp: ["qtd inspecionada", "inspecionado"],
+            c_ruim_total: ["qtd ruim", "refugo"],
+            c_data: ["data"],
+            c_horas: ["horas", "qtd. em horas", "qtd em horas", "qtd.em horas"]
+        }
+
+        for target, aliases in mapeamento.items():
+            # Procura a coluna na planilha ignorando maiúsculas/minúsculas e espaços nas extremidades
+            match = [c for c in df.columns if c.lower().strip() == target.lower() or c.lower().strip() in aliases]
+            if match:
+                df = df.rename(columns={match[0]: target})
+            elif target not in df.columns:
+                df[target] = 0 if target != c_data else pd.NaT
+
         df = df.dropna(subset=[c_prod])
         df[c_prod] = df[c_prod].astype(str).str.strip()
         df[c_data] = pd.to_datetime(df[c_data], errors='coerce')
         
-        for c in [c_insp, c_ruim_total]:
-            if c in df.columns:
-                df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+        for c in [c_insp, c_ruim_total, c_horas]:
+            df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
 
         lista_defeitos = []
         for i in range(1, 5):
@@ -86,14 +103,16 @@ def atualizar_pagina(n, prod_sel):
     df_p = df[df['Produto'] == val].sort_values('Data', ascending=False)
     falhas = df_p[df_p['Qtd Ruim'] > 0]
     ultima_f = falhas['Data'].max() if not falhas.empty else df_p['Data'].min()
+    data_inicio = df_p['Data'].min().strftime('%d/%m/%Y') if not df_p.empty and pd.notnull(df_p['Data'].min()) else "-"
     dias = (hoje - ultima_f).days if pd.notnull(ultima_f) else 0
     cor = "#28a745" if dias >= 90 else "#ff8c00"
-    txt_status = f"LIBERADO ({dias} Dias OK)" if dias >= 90 else f"EM CONTENÇÃO ({dias}/90 Dias)"
+    txt_status = f"LIBERADO ({dias} Dias OK) - Início: {data_inicio}" if dias >= 90 else f"EM CONTENÇÃO ({dias}/90 Dias) - Início: {data_inicio}"
 
     kpis = html.Div(style={'display': 'flex', 'justifyContent': 'space-around', 'marginBottom': '20px'}, children=[
         html.Div([html.B("INSPECIONADO TOTAL"), html.H2(f"{df['Qtd Inspecionada'].sum():,.0f}")], style={'textAlign': 'center'}),
         html.Div([html.B(f"STATUS: {val}"), html.H2(txt_status, style={'color': cor, 'fontSize': '24px'})], 
                  style={'textAlign': 'center', 'border': f'2px solid {cor}', 'padding': '10px', 'borderRadius': '10px'}),
+        html.Div([html.B("HORAS INSPEÇÃO (ITEM)"), html.H2(f"{df_p['Horas'].sum():,.1f}h")], style={'textAlign': 'center'}),
         html.Div([html.B("REFUGO TOTAL"), html.H2(f"{df['Qtd Ruim'].sum():,.0f}", style={'color': 'red'})], style={'textAlign': 'center'}),
     ])
     

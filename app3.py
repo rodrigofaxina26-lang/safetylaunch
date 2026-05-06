@@ -3,9 +3,49 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from dash import Dash, html, dcc, Input, Output
+from pathlib import Path
 
 # Caminho do seu arquivo
 PATH_ARQUIVO = r"P:\PUBLICO\Contenção\Quarentena Controle\2026\controle_lancamento_seguro\REGISTROS_E_ CADASTROS DE PRODUTOS_LANÇAMENTO_SEGURO_CONTENÇÃO 13_02_26.xlsx"
+
+
+BASE_DIR = Path(__file__).resolve().parent
+CACHE_DADOS = BASE_DIR / "cache_dados.pkl"
+CACHE_DEFEITOS = BASE_DIR / "cache_defeitos.pkl"
+TODOS_MESES = "__todos__"
+NOMES_MESES = {
+    1: "Janeiro",
+    2: "Fevereiro",
+    3: "Março",
+    4: "Abril",
+    5: "Maio",
+    6: "Junho",
+    7: "Julho",
+    8: "Agosto",
+    9: "Setembro",
+    10: "Outubro",
+    11: "Novembro",
+    12: "Dezembro",
+}
+
+
+def filtrar_por_mes(df, mes):
+    if df is None or df.empty or not mes or mes == TODOS_MESES or "Data" not in df.columns:
+        return df
+    return df[df["Data"].dt.to_period("M").astype(str) == mes]
+
+
+def opcoes_meses(df, incluir_todos=True):
+    opcoes = [{"label": "Todos os meses", "value": TODOS_MESES}] if incluir_todos else []
+    if df is None or df.empty or "Data" not in df.columns:
+        return opcoes
+
+    meses = df["Data"].dropna().dt.to_period("M").drop_duplicates().sort_values(ascending=False)
+    opcoes.extend(
+        {"label": f"{NOMES_MESES[mes.month]}/{mes.year}", "value": str(mes)}
+        for mes in meses
+    )
+    return opcoes
 
 
 def carregar_dados_reais():
@@ -20,15 +60,32 @@ def carregar_dados_reais():
         df = pd.read_excel(PATH_ARQUIVO, skiprows=header_row)
         df.columns = [str(c).replace("\n", " ").strip() for c in df.columns]
 
-        c_prod, c_insp, c_ruim_total, c_data = "Produto", "Qtd Inspecionada", "Qtd Ruim", "Data"
+        # Nomes padronizados para uso interno no código
+        c_prod, c_insp, c_ruim_total, c_data, c_horas = "Produto", "Qtd Inspecionada", "Qtd Ruim", "Data", "Horas"
+
+        # Mapeamento robusto para garantir que as colunas sejam encontradas mesmo com variações
+        mapeamento = {
+            c_prod: ["produto"],
+            c_insp: ["qtd inspecionada", "inspecionado"],
+            c_ruim_total: ["qtd ruim", "refugo"],
+            c_data: ["data"],
+            c_horas: ["horas", "qtd. em horas", "qtd em horas", "qtd.em horas"]
+        }
+
+        for target, aliases in mapeamento.items():
+            # Procura a coluna na planilha ignorando maiúsculas/minúsculas e espaços nas extremidades
+            match = [c for c in df.columns if c.lower().strip() == target.lower() or c.lower().strip() in aliases]
+            if match:
+                df = df.rename(columns={match[0]: target})
+            elif target not in df.columns:
+                df[target] = 0 if target != c_data else pd.NaT
 
         df = df.dropna(subset=[c_prod])
         df[c_prod] = df[c_prod].astype(str).str.strip()
         df[c_data] = pd.to_datetime(df[c_data], errors="coerce")
 
-        for c in [c_insp, c_ruim_total]:
-            if c in df.columns:
-                df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+        for c in [c_insp, c_ruim_total, c_horas]:
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
         lista_defeitos = []
         for i in range(1, 5):
@@ -41,12 +98,20 @@ def carregar_dados_reais():
                         if nome_v.endswith(".0"):
                             nome_v = nome_v[:-2]
                         lista_defeitos.append(
-                            {"Produto": linha[c_prod], "Descricao": nome_v, "Quantidade": qtd_v}
+                            {"Produto": linha[c_prod], "Data": linha[c_data], "Descricao": nome_v, "Quantidade": qtd_v}
                         )
 
-        return df, pd.DataFrame(lista_defeitos)
+        df_defeitos = pd.DataFrame(lista_defeitos)
+        df.to_pickle(CACHE_DADOS)
+        df_defeitos.to_pickle(CACHE_DEFEITOS)
+        return df, df_defeitos
     except Exception as e:
         print(f"Erro na leitura: {e}")
+        try:
+            print("Usando cache local da última leitura válida.")
+            return pd.read_pickle(CACHE_DADOS), pd.read_pickle(CACHE_DEFEITOS)
+        except Exception as cache_e:
+            print(f"Erro ao carregar cache: {cache_e}")
         return None, None
 
 
@@ -162,7 +227,84 @@ app.layout = html.Div(
                         )
                     ],
                 ),
-                html.Div(id="kpis-content"),
+                html.Div(
+                    style={
+                        "display": "grid",
+                        "gridTemplateColumns": "repeat(auto-fit, minmax(240px, 1fr))",
+                        "gap": "20px",
+                    },
+                    children=[
+                        html.Div(
+                            style=ESTILO_CARD,
+                            children=[
+                                html.Div(
+                                    "INSPECIONADO TOTAL",
+                                    style={"color": CORES["texto_suave"], "fontWeight": "600", "letterSpacing": "0.6px"},
+                                ),
+                                html.H2(
+                                    id="kpi-inspecionado",
+                                    style={"margin": "10px 0 0 0", "color": CORES["azul_escuro"], "fontSize": "34px"},
+                                ),
+                            ],
+                        ),
+                        html.Div(
+                            id="card-status",
+                            style=ESTILO_CARD,
+                            children=[
+                                html.Div(
+                                    id="kpi-status-label",
+                                    style={"color": CORES["texto_suave"], "fontWeight": "600", "letterSpacing": "0.6px"},
+                                ),
+                                html.H2(id="kpi-status", style={"margin": "10px 0 0 0", "fontSize": "28px"}),
+                            ],
+                        ),
+                        html.Div(
+                            style=ESTILO_CARD,
+                            children=[
+                                html.Div(
+                                    "HORAS ACUMULADAS",
+                                    style={"color": CORES["texto_suave"], "fontWeight": "600", "letterSpacing": "0.6px"},
+                                ),
+                                html.H2(
+                                    id="kpi-horas-acumuladas",
+                                    style={"margin": "10px 0 0 0", "color": CORES["azul_claro"], "fontSize": "34px"},
+                                ),
+                            ],
+                        ),
+                        html.Div(
+                            style=ESTILO_CARD,
+                            children=[
+                                html.Div(
+                                    "HORAS DO MÊS",
+                                    style={"color": CORES["texto_suave"], "fontWeight": "600", "letterSpacing": "0.6px"},
+                                ),
+                                dcc.Dropdown(
+                                    id="dropdown-mes-horas",
+                                    clearable=False,
+                                    value=str(pd.Timestamp.now().to_period("M")),
+                                    style={"marginTop": "10px"},
+                                ),
+                                html.H2(
+                                    id="kpi-horas-mes",
+                                    style={"margin": "12px 0 0 0", "color": CORES["verde"], "fontSize": "34px"},
+                                ),
+                            ],
+                        ),
+                        html.Div(
+                            style=ESTILO_CARD,
+                            children=[
+                                html.Div(
+                                    "REFUGO TOTAL",
+                                    style={"color": CORES["texto_suave"], "fontWeight": "600", "letterSpacing": "0.6px"},
+                                ),
+                                html.H2(
+                                    id="kpi-refugo",
+                                    style={"margin": "10px 0 0 0", "color": CORES["vermelho"], "fontSize": "34px"},
+                                ),
+                            ],
+                        ),
+                    ],
+                ),
                 html.Div(
                     style=ESTILO_CARD,
                     children=[
@@ -174,10 +316,39 @@ app.layout = html.Div(
                             "Selecione um produto para visualizar o total de refugo e o detalhamento dos principais defeitos.",
                             style={"margin": "8px 0 18px 0", "color": CORES["texto_suave"]},
                         ),
-                        dcc.Dropdown(
-                            id="dropdown-prod",
-                            clearable=False,
-                            style={"maxWidth": "420px", "marginBottom": "18px"},
+                        html.Div(
+                            style={
+                                "display": "grid",
+                                "gridTemplateColumns": "repeat(auto-fit, minmax(220px, 1fr))",
+                                "gap": "14px",
+                                "maxWidth": "680px",
+                                "marginBottom": "18px",
+                            },
+                            children=[
+                                html.Div(
+                                    children=[
+                                        html.Div(
+                                            "PRODUTO",
+                                            style={"marginBottom": "6px", "color": CORES["texto_suave"], "fontWeight": "600"},
+                                        ),
+                                        dcc.Dropdown(id="dropdown-prod", clearable=False),
+                                    ],
+                                ),
+                                html.Div(
+                                    children=[
+                                        html.Div(
+                                            "MÊS",
+                                            style={"marginBottom": "6px", "color": CORES["texto_suave"], "fontWeight": "600"},
+                                        ),
+                                        dcc.Dropdown(
+                                            id="dropdown-mes",
+                                            clearable=False,
+                                            value=TODOS_MESES,
+                                            options=[{"label": "Todos os meses", "value": TODOS_MESES}],
+                                        ),
+                                    ],
+                                ),
+                            ],
                         ),
                         dcc.Graph(id="grafico-detalhe", config={"displayModeBar": False}),
                     ],
@@ -203,20 +374,44 @@ app.layout = html.Div(
 
 
 @app.callback(
+    [Output("dropdown-mes", "options"), Output("dropdown-mes-horas", "options")],
+    [Input("intervalo", "n_intervals")],
+)
+def atualizar_opcoes_meses(n):
+    df, _ = carregar_dados_reais()
+    return opcoes_meses(df), opcoes_meses(df, incluir_todos=False)
+
+
+@app.callback(
     [
-        Output("kpis-content", "children"),
         Output("dropdown-prod", "options"),
         Output("dropdown-prod", "value"),
         Output("grafico-geral", "figure"),
         Output("txt-update", "children"),
+        Output("kpi-inspecionado", "children"),
+        Output("kpi-status-label", "children"),
+        Output("kpi-status", "children"),
+        Output("kpi-status", "style"),
+        Output("card-status", "style"),
+        Output("kpi-horas-acumuladas", "children"),
+        Output("kpi-horas-mes", "children"),
+        Output("kpi-refugo", "children"),
     ],
-    [Input("intervalo", "n_intervals")],
-    [Input("dropdown-prod", "value")],
+    [
+        Input("intervalo", "n_intervals"),
+        Input("dropdown-prod", "value"),
+        Input("dropdown-mes", "value"),
+        Input("dropdown-mes-horas", "value"),
+    ],
 )
-def atualizar_pagina(n, prod_sel):
+def atualizar_pagina(n, prod_sel, mes_sel, mes_horas_sel):
     df, df_def = carregar_dados_reais()
     if df is None:
-        return html.Div("Erro"), [], None, go.Figure(), "Erro"
+        status_style = {"margin": "10px 0 0 0", "color": CORES["vermelho"], "fontSize": "28px"}
+        return [], None, go.Figure(), "Erro", "-", "STATUS", "Erro na leitura", status_style, ESTILO_CARD, "-", "-", "-"
+
+    df_total = df.copy()
+    df = filtrar_por_mes(df, mes_sel)
 
     prods = sorted(df["Produto"].unique())
     opcoes = [{"label": p, "value": p} for p in prods]
@@ -224,61 +419,16 @@ def atualizar_pagina(n, prod_sel):
 
     hoje = pd.Timestamp.now().normalize()
     df_p = df[df["Produto"] == val].sort_values("Data", ascending=False)
+    df_p_total = df_total[df_total["Produto"] == val].sort_values("Data", ascending=False)
     falhas = df_p[df_p["Qtd Ruim"] > 0]
     ultima_f = falhas["Data"].max() if not falhas.empty else df_p["Data"].min()
+    data_inicio = df_p["Data"].min().strftime("%d/%m/%Y") if not df_p.empty and pd.notnull(df_p["Data"].min()) else "-"
     dias = (hoje - ultima_f).days if pd.notnull(ultima_f) else 0
     cor = CORES["verde"] if dias >= 90 else CORES["laranja"]
-    txt_status = f"LIBERADO ({dias} Dias OK)" if dias >= 90 else f"EM CONTENÇÃO ({dias}/90 Dias)"
+    txt_status = f"LIBERADO ({dias} Dias OK) - Início: {data_inicio}" if dias >= 90 else f"EM CONTENÇÃO ({dias}/90 Dias) - Início: {data_inicio}"
 
-    kpis = html.Div(
-        style={
-            "display": "grid",
-            "gridTemplateColumns": "repeat(auto-fit, minmax(240px, 1fr))",
-            "gap": "20px",
-        },
-        children=[
-            html.Div(
-                style=ESTILO_CARD,
-                children=[
-                    html.Div(
-                        "INSPECIONADO TOTAL",
-                        style={"color": CORES["texto_suave"], "fontWeight": "600", "letterSpacing": "0.6px"},
-                    ),
-                    html.H2(
-                        f"{df['Qtd Inspecionada'].sum():,.0f}",
-                        style={"margin": "10px 0 0 0", "color": CORES["azul_escuro"], "fontSize": "34px"},
-                    ),
-                ],
-            ),
-            html.Div(
-                style={
-                    **ESTILO_CARD,
-                    "border": f"2px solid {cor}",
-                    "background": f"linear-gradient(135deg, {cor}10 0%, #ffffff 80%)",
-                },
-                children=[
-                    html.Div(
-                        f"STATUS: {val}",
-                        style={"color": CORES["texto_suave"], "fontWeight": "600", "letterSpacing": "0.6px"},
-                    ),
-                    html.H2(txt_status, style={"margin": "10px 0 0 0", "color": cor, "fontSize": "28px"}),
-                ],
-            ),
-            html.Div(
-                style=ESTILO_CARD,
-                children=[
-                    html.Div(
-                        "REFUGO TOTAL",
-                        style={"color": CORES["texto_suave"], "fontWeight": "600", "letterSpacing": "0.6px"},
-                    ),
-                    html.H2(
-                        f"{df['Qtd Ruim'].sum():,.0f}",
-                        style={"margin": "10px 0 0 0", "color": CORES["vermelho"], "fontSize": "34px"},
-                    ),
-                ],
-            ),
-        ],
-    )
+    mes_horas = mes_horas_sel or str(hoje.to_period("M"))
+    horas_mes = filtrar_por_mes(df_p_total, mes_horas)["Horas"].sum()
 
     df_g = df.groupby("Produto")[["Qtd Inspecionada", "Qtd Ruim"]].sum().reset_index()
     fig_g = make_subplots(specs=[[{"secondary_y": True}]])
@@ -323,17 +473,40 @@ def atualizar_pagina(n, prod_sel):
     fig_g.update_xaxes(showgrid=False)
     fig_g.update_yaxes(gridcolor="rgba(12, 35, 64, 0.08)")
 
-    return kpis, opcoes, val, fig_g, f"Sincronizado: {pd.Timestamp.now().strftime('%H:%M:%S')}"
+    status_style = {"margin": "10px 0 0 0", "color": cor, "fontSize": "28px"}
+    status_card_style = {
+        **ESTILO_CARD,
+        "border": f"2px solid {cor}",
+        "background": f"linear-gradient(135deg, {cor}10 0%, #ffffff 80%)",
+    }
+
+    return (
+        opcoes,
+        val,
+        fig_g,
+        f"Sincronizado: {pd.Timestamp.now().strftime('%H:%M:%S')}",
+        f"{df['Qtd Inspecionada'].sum():,.0f}",
+        f"STATUS: {val}",
+        txt_status,
+        status_style,
+        status_card_style,
+        f"{df_p_total['Horas'].sum():,.1f}h",
+        f"{horas_mes:,.1f}h",
+        f"{df['Qtd Ruim'].sum():,.0f}",
+    )
 
 
 @app.callback(
     Output("grafico-detalhe", "figure"),
-    [Input("dropdown-prod", "value"), Input("intervalo", "n_intervals")],
+    [Input("dropdown-prod", "value"), Input("dropdown-mes", "value"), Input("intervalo", "n_intervals")],
 )
-def atualizar_defeitos(prod, n):
+def atualizar_defeitos(prod, mes_sel, n):
     df, df_def = carregar_dados_reais()
     if df_def is None or df_def.empty or not prod:
         return px.bar()
+
+    df = filtrar_por_mes(df, mes_sel)
+    df_def = filtrar_por_mes(df_def, mes_sel)
 
     total_refugo = df[df["Produto"] == prod]["Qtd Ruim"].sum()
     df_f = df_def[df_def["Produto"] == prod].groupby("Descricao", as_index=False)["Quantidade"].sum()
