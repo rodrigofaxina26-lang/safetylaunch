@@ -32,7 +32,8 @@ NOMES_MESES = {
 def filtrar_por_mes(df, mes):
     if df is None or df.empty or not mes or mes == TODOS_MESES or "Data" not in df.columns:
         return df
-    return df[df["Data"].dt.to_period("M").astype(str) == mes]
+    datas = pd.to_datetime(df["Data"], errors="coerce")
+    return df[datas.dt.to_period("M").astype(str) == mes]
 
 
 def opcoes_meses(df, incluir_todos=True):
@@ -40,12 +41,58 @@ def opcoes_meses(df, incluir_todos=True):
     if df is None or df.empty or "Data" not in df.columns:
         return opcoes
 
-    meses = df["Data"].dropna().dt.to_period("M").drop_duplicates().sort_values(ascending=False)
+    datas = pd.to_datetime(df["Data"], errors="coerce")
+    meses = datas.dropna().dt.to_period("M").drop_duplicates().sort_values(ascending=False)
     opcoes.extend(
         {"label": f"{NOMES_MESES[mes.month]}/{mes.year}", "value": str(mes)}
         for mes in meses
     )
     return opcoes
+
+
+def montar_df_defeitos(df):
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["Produto", "Data", "Descricao", "Quantidade"])
+
+    lista_defeitos = []
+    for i in range(1, 5):
+        col_n, col_q = f"Defeito {i}", f"Qtd Defeito {i}"
+        if col_n in df.columns and col_q in df.columns:
+            qtd_defeito = pd.to_numeric(df[col_q], errors="coerce").fillna(0)
+            for idx, linha in df.iterrows():
+                nome_v, qtd_v = str(linha[col_n]).strip(), qtd_defeito.loc[idx]
+                if nome_v.lower() != "nan" and nome_v != "" and qtd_v > 0:
+                    if nome_v.endswith(".0"):
+                        nome_v = nome_v[:-2]
+                    lista_defeitos.append(
+                        {
+                            "Produto": linha["Produto"],
+                            "Data": linha["Data"],
+                            "Descricao": nome_v,
+                            "Quantidade": qtd_v,
+                        }
+                    )
+
+    return pd.DataFrame(lista_defeitos, columns=["Produto", "Data", "Descricao", "Quantidade"])
+
+
+def normalizar_dados_cache(df, df_defeitos):
+    if df is not None and not df.empty and "Data" in df.columns:
+        df = df.copy()
+        df["Data"] = pd.to_datetime(df["Data"], errors="coerce")
+
+    if df_defeitos is None or df_defeitos.empty:
+        df_defeitos = montar_df_defeitos(df)
+    else:
+        df_defeitos = df_defeitos.copy()
+        if "Data" not in df_defeitos.columns:
+            df_defeitos = montar_df_defeitos(df)
+        else:
+            df_defeitos["Data"] = pd.to_datetime(df_defeitos["Data"], errors="coerce")
+            if df_defeitos["Data"].isna().all():
+                df_defeitos = montar_df_defeitos(df)
+
+    return df, df_defeitos
 
 
 def carregar_dados_reais():
@@ -87,21 +134,7 @@ def carregar_dados_reais():
         for c in [c_insp, c_ruim_total, c_horas]:
             df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
-        lista_defeitos = []
-        for i in range(1, 5):
-            col_n, col_q = f"Defeito {i}", f"Qtd Defeito {i}"
-            if col_n in df.columns and col_q in df.columns:
-                df[col_q] = pd.to_numeric(df[col_q], errors="coerce").fillna(0)
-                for _, linha in df.iterrows():
-                    nome_v, qtd_v = str(linha[col_n]).strip(), linha[col_q]
-                    if nome_v.lower() != "nan" and nome_v != "" and qtd_v > 0:
-                        if nome_v.endswith(".0"):
-                            nome_v = nome_v[:-2]
-                        lista_defeitos.append(
-                            {"Produto": linha[c_prod], "Data": linha[c_data], "Descricao": nome_v, "Quantidade": qtd_v}
-                        )
-
-        df_defeitos = pd.DataFrame(lista_defeitos)
+        df_defeitos = montar_df_defeitos(df)
         df.to_pickle(CACHE_DADOS)
         df_defeitos.to_pickle(CACHE_DEFEITOS)
         return df, df_defeitos
@@ -109,7 +142,10 @@ def carregar_dados_reais():
         print(f"Erro na leitura: {e}")
         try:
             print("Usando cache local da última leitura válida.")
-            return pd.read_pickle(CACHE_DADOS), pd.read_pickle(CACHE_DEFEITOS)
+            df, df_defeitos = normalizar_dados_cache(pd.read_pickle(CACHE_DADOS), pd.read_pickle(CACHE_DEFEITOS))
+            df.to_pickle(CACHE_DADOS)
+            df_defeitos.to_pickle(CACHE_DEFEITOS)
+            return df, df_defeitos
         except Exception as cache_e:
             print(f"Erro ao carregar cache: {cache_e}")
         return None, None
@@ -282,7 +318,7 @@ app.layout = html.Div(
                                     id="dropdown-mes-horas",
                                     clearable=False,
                                     value=str(pd.Timestamp.now().to_period("M")),
-                                    style={"marginTop": "10px"},
+                                    style={"marginTop": "10px", "minWidth": "220px"},
                                 ),
                                 html.H2(
                                     id="kpi-horas-mes",
@@ -345,6 +381,7 @@ app.layout = html.Div(
                                             clearable=False,
                                             value=TODOS_MESES,
                                             options=[{"label": "Todos os meses", "value": TODOS_MESES}],
+                                            style={"minWidth": "220px"},
                                         ),
                                     ],
                                 ),
@@ -420,12 +457,19 @@ def atualizar_pagina(n, prod_sel, mes_sel, mes_horas_sel):
     hoje = pd.Timestamp.now().normalize()
     df_p = df[df["Produto"] == val].sort_values("Data", ascending=False)
     df_p_total = df_total[df_total["Produto"] == val].sort_values("Data", ascending=False)
-    falhas = df_p[df_p["Qtd Ruim"] > 0]
-    ultima_f = falhas["Data"].max() if not falhas.empty else df_p["Data"].min()
-    data_inicio = df_p["Data"].min().strftime("%d/%m/%Y") if not df_p.empty and pd.notnull(df_p["Data"].min()) else "-"
-    dias = (hoje - ultima_f).days if pd.notnull(ultima_f) else 0
+    falhas = df_p_total[df_p_total["Qtd Ruim"] > 0]
+    ultima_f = falhas["Data"].max() if not falhas.empty else pd.NaT
+    data_inicio_ts = df_p_total["Data"].min() if not df_p_total.empty else pd.NaT
+    marco_status = ultima_f if pd.notnull(ultima_f) else data_inicio_ts
+    data_inicio = data_inicio_ts.strftime("%d/%m/%Y") if pd.notnull(data_inicio_ts) else "-"
+    texto_marco = (
+        f"Última falha: {ultima_f.strftime('%d/%m/%Y')}"
+        if pd.notnull(ultima_f)
+        else f"Início: {data_inicio}"
+    )
+    dias = (hoje - marco_status).days if pd.notnull(marco_status) else 0
     cor = CORES["verde"] if dias >= 90 else CORES["laranja"]
-    txt_status = f"LIBERADO ({dias} Dias OK) - Início: {data_inicio}" if dias >= 90 else f"EM CONTENÇÃO ({dias}/90 Dias) - Início: {data_inicio}"
+    txt_status = f"LIBERADO ({dias} Dias OK) - {texto_marco}" if dias >= 90 else f"EM CONTENÇÃO ({dias}/90 Dias) - {texto_marco}"
 
     mes_horas = mes_horas_sel or str(hoje.to_period("M"))
     horas_mes = filtrar_por_mes(df_p_total, mes_horas)["Horas"].sum()
